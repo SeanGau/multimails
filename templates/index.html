@@ -26,18 +26,26 @@
 </head>
 
 <body>
-    <div class="container d-flex flex-column align-items-center justify-content-center h-100">
+    <div class="container d-flex flex-column py-5">
         <div class="row w-100 align-items-center justify-content-center">
             <form class="col-md-6" method="post" action="/" enctype="multipart/form-data">
                 <label for="name" class="form-label">寄件者名稱</label>
-                <input class="form-control mb-3" type="text" name="name" id="input-name" required>
-                <label for="email" class="form-label">Email（請使用Gmail）</label>
-                <input class="form-control mb-3" type="text" name="email" id="input-email" required>
-                <label for="apppw" class="form-label">password（請使用google 應用程式密碼）</label>
-                <input class="form-control mb-3" type="password" name="apppw" id="input-apppw" required>
+                <input class="form-control mb-3" type="text" name="name" id="input-name" placeholder="高阿翔" required>
+                <label for="smtp_server" class="form-label">SMTP Server（例：smtp.gmail.com, smtp.office365.com）</label>
+                <input class="form-control mb-3" type="text" name="smtp_server" id="input-smtp-server" placeholder="smtp.gmail.com" required>
+                <label for="smtp_port" class="form-label">SMTP Port（例：587 for TLS, 465 for SSL）</label>
+                <input class="form-control mb-3" type="number" name="smtp_port" id="input-smtp-port" value="587" required>
+                <div class="form-check mb-3 text-white">
+                    <input class="form-check-input" type="checkbox" name="smtp_use_tls" id="input-smtp-tls" checked>
+                    <label class="form-check-label" for="input-smtp-tls">使用 TLS/SSL</label>
+                </div>
+                <label for="email" class="form-label">Email / Username</label>
+                <input class="form-control mb-3" type="text" name="email" id="input-email" placeholder="your@email.com" required>
+                <label for="apppw" class="form-label">Password</label>
+                <input class="form-control mb-3" type="password" name="apppw" id="input-apppw" placeholder="***********" required>
                 <label for="template" class="form-label">template（支援Markdown語法，變數前面需加上「$」）</label>
                 <textarea class="form-control mb-3" name="template" id="input-template" required>Dear $name,
-Thanks for using.</textarea>
+Thanks for using this service.</textarea>
                 <label for="files" class="form-label">csv（必要欄位：email、subject）</label>
                 <input type="file" class="form-control mb-3" name="csv" id="input-csv" accept=".csv" required>
                 <label for="files" class="form-label">附件（目前限制pdf，請在csv檔中加上「attachment」欄並對應檔名）</label>
