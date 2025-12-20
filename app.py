@@ -52,7 +52,7 @@ def index():
         app.config['MAIL_USE_SSL'] = False  # Set to True if using port 465
         app.config['MAIL_USERNAME'] = _data.get('email')
         app.config['MAIL_PASSWORD'] = _data.get('apppw')
-        app.config['MAIL_DEFAULT_SENDER'] = (_data.get('name'), _data.get('email'))
+        app.config['MAIL_DEFAULT_SENDER'] = _data.get('from')
         mail.init_app(app)
         csvfile = flask.request.files['csv']
         if 'files[]' in flask.request.files:
