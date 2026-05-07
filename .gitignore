@@ -28,8 +28,10 @@ htmlcov/
 *,cover
 
 config.py
+presets.db
 
 # pyre
 .pyre/
 .pyre_configuration
 .watchmanconfig
+.gstack/

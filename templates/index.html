@@ -74,18 +74,19 @@
     </a>
     <div class="container d-flex flex-column py-5">
         <div class="row w-100 align-items-center justify-content-center">
-            <form class="col-md-6" method="post" action="/" enctype="multipart/form-data">
+            <form class="col-md-6" id="main-form" method="post" action="/" enctype="multipart/form-data">
                 <label for="from" class="form-label">寄件者</label>
                 <input class="form-control mb-3" type="text" name="from" id="input-from" placeholder="your@email.com"
-                    required>
+                    value="{{ preset.from }}" required>
                 <label for="smtp_server" class="form-label">SMTP Server（例：smtp.gmail.com, smtp.office365.com）</label>
                 <input class="form-control mb-3" type="text" name="smtp_server" id="input-smtp-server"
-                    placeholder="smtp.gmail.com" required>
+                    placeholder="smtp.gmail.com" value="{{ preset.smtp_server }}" required>
                 <label for="smtp_port" class="form-label">SMTP Port（例：587 for TLS, 465 for SSL）</label>
-                <input class="form-control mb-3" type="number" name="smtp_port" id="input-smtp-port" value="587"
-                    required>
+                <input class="form-control mb-3" type="number" name="smtp_port" id="input-smtp-port"
+                    value="{{ preset.smtp_port }}" required>
                 <div class="form-check mb-3 text-white">
-                    <input class="form-check-input" type="checkbox" name="smtp_use_tls" id="input-smtp-tls" checked>
+                    <input class="form-check-input" type="checkbox" name="smtp_use_tls" id="input-smtp-tls"
+                        {% if preset.smtp_use_tls %}checked{% endif %}>
                     <label class="form-check-label" for="input-smtp-tls">使用 TLS/SSL</label>
                 </div>
                 <label for="email" class="form-label">Email / Username</label>
@@ -95,20 +96,51 @@
                 <input class="form-control mb-3" type="password" name="apppw" id="input-apppw" placeholder="***********"
                     required>
                 <label for="template" class="form-label">template（支援Markdown語法，變數前面需加上「$」）</label>
-                <textarea class="form-control mb-3" name="template" id="input-template" required>Dear $name,
-Thanks for using this service.</textarea>
+                <textarea class="form-control mb-3" name="template" id="input-template" required>{{ preset.template }}</textarea>
                 <label for="files" class="form-label">csv（必要欄位：email、subject）</label>
                 <input type="file" class="form-control mb-3" name="csv" id="input-csv" accept=".csv" required>
                 <label for="files" class="form-label">附件（目前限制pdf，請在csv檔中加上「attachment」欄並對應檔名）</label>
                 <input type="file" class="form-control mb-3" multiple="multiple" name="files[]" id="input-files"
                     accept=".pdf">
                 <hr>
-                <div class="d-grid">
+                <div class="d-grid gap-2">
                     <button type="submit" class="btn btn-warning">submit</button>
+                    <button type="button" class="btn btn-light" id="save-preset-btn">儲存設定並產生分享連結</button>
+                </div>
+                <div id="preset-link" class="alert alert-success mt-3 d-none" role="alert">
+                    分享連結（不含密碼與檔案）：
+                    <a id="preset-link-url" href="#" target="_blank"></a>
                 </div>
             </form>
         </div>
     </div>
+    <script>
+        document.getElementById('save-preset-btn').addEventListener('click', async function () {
+            const form = document.getElementById('main-form');
+            const formData = new FormData();
+            // Only include preset-eligible fields (exclude password, username, csv, attachments)
+            const fields = ['from', 'smtp_server', 'smtp_port', 'template'];
+            fields.forEach(name => {
+                const el = form.querySelector(`[name="${name}"]`);
+                if (el) formData.append(name, el.value);
+            });
+            const tlsEl = form.querySelector('[name="smtp_use_tls"]');
+            if (tlsEl && tlsEl.checked) formData.append('smtp_use_tls', 'on');
+
+            try {
+                const res = await fetch('/preset/save', { method: 'POST', body: formData });
+                if (!res.ok) throw new Error('save failed');
+                const data = await res.json();
+                const box = document.getElementById('preset-link');
+                const link = document.getElementById('preset-link-url');
+                link.href = data.url;
+                link.textContent = data.url;
+                box.classList.remove('d-none');
+            } catch (err) {
+                alert('儲存失敗：' + err.message);
+            }
+        });
+    </script>
     <script src="https://kit.fontawesome.com/cc94f52acd.js" crossorigin="anonymous"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"
         integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>
