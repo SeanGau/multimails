@@ -1,6 +1,7 @@
 import flask
 import os
 import csv
+import json
 import shutil
 import sqlite3
 import secrets
@@ -25,6 +26,7 @@ DB_PATH = os.path.join(path, 'presets.db')
 DEFAULT_TEMPLATE = "Dear $name,\nThanks for using this service."
 DEFAULT_PRESET = {
     'from': '',
+    'reply_to': '',
     'smtp_server': '',
     'smtp_port': 587,
     'smtp_use_tls': True,
@@ -43,14 +45,28 @@ def init_db():
         conn.execute('''
             CREATE TABLE IF NOT EXISTS presets (
                 token TEXT PRIMARY KEY,
-                from_addr TEXT,
-                smtp_server TEXT,
-                smtp_port INTEGER,
-                smtp_use_tls INTEGER,
-                template TEXT,
                 created_at TEXT
             )
         ''')
+        cols = {r['name'] for r in conn.execute('PRAGMA table_info(presets)').fetchall()}
+        if 'data' not in cols:
+            conn.execute('ALTER TABLE presets ADD COLUMN data TEXT')
+        legacy_cols = {'from_addr', 'smtp_server', 'smtp_port', 'smtp_use_tls', 'template'}
+        if legacy_cols.issubset(cols):
+            rows = conn.execute(
+                'SELECT token, from_addr, smtp_server, smtp_port, smtp_use_tls, template '
+                'FROM presets WHERE data IS NULL OR data = ""'
+            ).fetchall()
+            for r in rows:
+                payload = json.dumps({
+                    'from': r['from_addr'] or '',
+                    'reply_to': '',
+                    'smtp_server': r['smtp_server'] or '',
+                    'smtp_port': r['smtp_port'] or 587,
+                    'smtp_use_tls': bool(r['smtp_use_tls']),
+                    'template': r['template'] or '',
+                })
+                conn.execute('UPDATE presets SET data = ? WHERE token = ?', (payload, r['token']))
 
 
 init_db()
@@ -62,10 +78,13 @@ def allowed_file(filename):
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
+    reply_to = None
+
     @flask.copy_current_request_context
     def send_mail(recevier_array, subject, html_content, upload_folder, attachment):
         try:
-            msg = Message(subject=subject, recipients=recevier_array, html=html_content)
+            msg = Message(subject=subject, recipients=recevier_array, html=html_content,
+                          reply_to=reply_to)
 
             if attachment is not None:
                 if ".pdf" not in attachment:
@@ -94,6 +113,7 @@ def index():
         app.config['MAIL_USERNAME'] = _data.get('email')
         app.config['MAIL_PASSWORD'] = _data.get('apppw')
         app.config['MAIL_DEFAULT_SENDER'] = _data.get('from')
+        reply_to = (_data.get('reply_to') or '').strip() or None
         mail.init_app(app)
         csvfile = flask.request.files['csv']
         if 'files[]' in flask.request.files:
@@ -105,12 +125,15 @@ def index():
         if csvfile and allowed_file(csvfile.filename):
             filename = csvfile.filename
             csvfile.save(os.path.join(UPLOAD_FOLDER, filename)) # type: ignore
-            with open(os.path.join(UPLOAD_FOLDER, csvfile.filename), encoding='utf-8', newline='') as csvfile_saved: # type: ignore
+            with open(os.path.join(UPLOAD_FOLDER, csvfile.filename), encoding='utf-8-sig', newline='') as csvfile_saved: # type: ignore
                 reader = csv.DictReader(csvfile_saved)
                 _data['template'] = markdown(_data['template'].replace("\r\n","<br>"))
                 rows = list(reader)
                 total = len(rows)
                 for i, row in enumerate(rows):
+                    if not row.get('email') or not row.get('subject') or not row.get('name'):
+                        error.append({"recevier": row.get('email'), "subject": row.get('subject'), "error": "Missing email, subject or name"})
+                        continue
                     content_tmpl = Template(_data['template'])
                     attachment = row.get('attachment', None)
                     t = threading.Thread(target = send_mail,args=([row['email']], row['subject'], content_tmpl.substitute(row), UPLOAD_FOLDER, attachment))
@@ -135,19 +158,18 @@ def index():
 def save_preset():
     data = flask.request.form
     token = secrets.token_urlsafe(6)
+    payload = json.dumps({
+        'from': data.get('from', ''),
+        'reply_to': data.get('reply_to', ''),
+        'smtp_server': data.get('smtp_server', ''),
+        'smtp_port': int(data.get('smtp_port') or 587),
+        'smtp_use_tls': data.get('smtp_use_tls') == 'on',
+        'template': data.get('template', ''),
+    })
     with get_db() as conn:
         conn.execute(
-            'INSERT INTO presets (token, from_addr, smtp_server, smtp_port, smtp_use_tls, template, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (
-                token,
-                data.get('from', ''),
-                data.get('smtp_server', ''),
-                int(data.get('smtp_port') or 587),
-                1 if data.get('smtp_use_tls') == 'on' else 0,
-                data.get('template', ''),
-                datetime.now(timezone.utc).isoformat(),
-            ),
+            'INSERT INTO presets (token, data, created_at) VALUES (?, ?, ?)',
+            (token, payload, datetime.now(timezone.utc).isoformat()),
         )
     share_url = flask.url_for('load_preset', token=token, _external=True)
     return flask.jsonify({'token': token, 'url': share_url})
@@ -156,20 +178,10 @@ def save_preset():
 @app.route('/p/<token>')
 def load_preset(token):
     with get_db() as conn:
-        row = conn.execute(
-            'SELECT from_addr, smtp_server, smtp_port, smtp_use_tls, template '
-            'FROM presets WHERE token = ?',
-            (token,),
-        ).fetchone()
-    if row is None:
+        row = conn.execute('SELECT data FROM presets WHERE token = ?', (token,)).fetchone()
+    if row is None or not row['data']:
         flask.abort(404)
-    preset = {
-        'from': row['from_addr'],
-        'smtp_server': row['smtp_server'],
-        'smtp_port': row['smtp_port'],
-        'smtp_use_tls': bool(row['smtp_use_tls']),
-        'template': row['template'],
-    }
+    preset = {**DEFAULT_PRESET, **json.loads(row['data'])}
     return flask.render_template('index.html', preset=preset)
 
 

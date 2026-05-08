@@ -78,6 +78,9 @@
                 <label for="from" class="form-label">寄件者</label>
                 <input class="form-control mb-3" type="text" name="from" id="input-from" placeholder="your@email.com"
                     value="{{ preset.from }}" required>
+                <label for="reply_to" class="form-label">Reply-To（選填）</label>
+                <input class="form-control mb-3" type="text" name="reply_to" id="input-reply-to"
+                    placeholder="reply@email.com (optional)" value="{{ preset.reply_to }}">
                 <label for="smtp_server" class="form-label">SMTP Server（例：smtp.gmail.com, smtp.office365.com）</label>
                 <input class="form-control mb-3" type="text" name="smtp_server" id="input-smtp-server"
                     placeholder="smtp.gmail.com" value="{{ preset.smtp_server }}" required>
@@ -119,7 +122,7 @@
             const form = document.getElementById('main-form');
             const formData = new FormData();
             // Only include preset-eligible fields (exclude password, username, csv, attachments)
-            const fields = ['from', 'smtp_server', 'smtp_port', 'template'];
+            const fields = ['from', 'reply_to', 'smtp_server', 'smtp_port', 'template'];
             fields.forEach(name => {
                 const el = form.querySelector(`[name="${name}"]`);
                 if (el) formData.append(name, el.value);
