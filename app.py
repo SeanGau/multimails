@@ -2,7 +2,6 @@ import flask
 import os
 import csv
 import json
-import queue
 import shutil
 import sqlite3
 import secrets
@@ -15,6 +14,8 @@ from markdown import markdown
 
 BATCH_SIZE = 100
 BATCH_SLEEP_SECONDS = 10
+JOB_RETENTION_SECONDS = 300
+STREAM_KEEPALIVE_SECONDS = 15
 
 app = flask.Flask(__name__)
 app.config.from_object('config')
@@ -80,14 +81,25 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def schedule_job_cleanup(job_id, delay=JOB_RETENTION_SECONDS):
+    def _cleanup():
+        time.sleep(delay)
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+    threading.Thread(target=_cleanup, daemon=True).start()
+
+
 def run_job(job_id, rows, template_html, upload_folder, reply_to):
     job = JOBS[job_id]
-    q = job['q']
+    cond = job['cond']
+    events = job['events']
     threads = []
     total = len(rows)
 
     def push(event):
-        q.put(event)
+        with cond:
+            events.append(event)
+            cond.notify_all()
 
     def send_one(row):
         recipient = row['email']
@@ -108,33 +120,41 @@ def run_job(job_id, rows, template_html, upload_folder, reply_to):
         except Exception as e:
             push({'type': 'error', 'recevier': recipient, 'subject': subject, 'error': str(e)})
 
-    for i, row in enumerate(rows):
-        if not row.get('email') or not row.get('subject') or not row.get('name'):
-            push({
-                'type': 'error',
-                'recevier': row.get('email'),
-                'subject': row.get('subject'),
-                'error': 'Missing email, subject or name',
-            })
-            continue
-        t = threading.Thread(target=send_one, args=(row,))
-        t.start()
-        threads.append(t)
-        if (i + 1) % BATCH_SIZE == 0 and (i + 1) < total:
-            for bt in threads[-BATCH_SIZE:]:
-                bt.join()
-            push({'type': 'pause', 'seconds': BATCH_SLEEP_SECONDS})
-            time.sleep(BATCH_SLEEP_SECONDS)
-
-    for t in threads:
-        t.join()
-
     try:
-        shutil.rmtree(upload_folder)
-    except OSError as e:
-        print("Error: %s : %s" % (upload_folder, e.strerror))
+        for i, row in enumerate(rows):
+            if not row.get('email') or not row.get('subject') or not row.get('name'):
+                push({
+                    'type': 'error',
+                    'recevier': row.get('email'),
+                    'subject': row.get('subject'),
+                    'error': 'Missing email, subject or name',
+                })
+                continue
+            t = threading.Thread(target=send_one, args=(row,))
+            t.start()
+            threads.append(t)
+            if (i + 1) % BATCH_SIZE == 0 and (i + 1) < total:
+                for bt in threads[-BATCH_SIZE:]:
+                    bt.join()
+                push({'type': 'pause', 'seconds': BATCH_SLEEP_SECONDS})
+                time.sleep(BATCH_SLEEP_SECONDS)
 
-    push({'type': 'done'})
+        for t in threads:
+            t.join()
+
+        try:
+            shutil.rmtree(upload_folder)
+        except OSError as e:
+            print("Error: %s : %s" % (upload_folder, e.strerror))
+
+        push({'type': 'done'})
+    except Exception as e:
+        push({'type': 'done', 'error': str(e)})
+    finally:
+        with cond:
+            job['done'] = True
+            cond.notify_all()
+        schedule_job_cleanup(job_id)
 
 
 @app.route('/', methods=['GET', 'POST'])
@@ -174,7 +194,12 @@ def index():
 
     job_id = secrets.token_urlsafe(8)
     with JOBS_LOCK:
-        JOBS[job_id] = {'q': queue.Queue(), 'total': len(rows)}
+        JOBS[job_id] = {
+            'events': [],
+            'done': False,
+            'cond': threading.Condition(),
+            'total': len(rows),
+        }
 
     worker = threading.Thread(
         target=run_job,
@@ -192,22 +217,41 @@ def stream(job_id):
         job = JOBS.get(job_id)
     if job is None:
         flask.abort(404)
-    q = job['q']
+    cond = job['cond']
+    events = job['events']
+
+    last_id_raw = (
+        flask.request.headers.get('Last-Event-ID')
+        or flask.request.args.get('lastEventId')
+    )
+    try:
+        cursor = int(last_id_raw) + 1 if last_id_raw is not None else 0
+    except (TypeError, ValueError):
+        cursor = 0
+    if cursor < 0:
+        cursor = 0
 
     def gen():
-        try:
-            while True:
-                try:
-                    event = q.get(timeout=20)
-                except queue.Empty:
-                    yield ': keepalive\n\n'
-                    continue
-                yield f'data: {json.dumps(event)}\n\n'
-                if event.get('type') == 'done':
-                    break
-        finally:
-            with JOBS_LOCK:
-                JOBS.pop(job_id, None)
+        nonlocal cursor
+        yield 'retry: 3000\n\n'
+        while True:
+            evt = None
+            event_id = None
+            with cond:
+                if cursor >= len(events) and not job['done']:
+                    cond.wait(timeout=STREAM_KEEPALIVE_SECONDS)
+                if cursor < len(events):
+                    event_id = cursor
+                    evt = events[cursor]
+                    cursor += 1
+            if evt is None:
+                if job['done']:
+                    return
+                yield ': keepalive\n\n'
+                continue
+            yield f'id: {event_id}\ndata: {json.dumps(evt)}\n\n'
+            if evt.get('type') == 'done':
+                return
 
     headers = {
         'Cache-Control': 'no-cache',
