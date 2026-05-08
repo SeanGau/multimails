@@ -2,6 +2,7 @@ import flask
 import os
 import csv
 import json
+import queue
 import shutil
 import sqlite3
 import secrets
@@ -32,6 +33,9 @@ DEFAULT_PRESET = {
     'smtp_use_tls': True,
     'template': DEFAULT_TEMPLATE,
 }
+
+JOBS = {}
+JOBS_LOCK = threading.Lock()
 
 
 def get_db():
@@ -76,82 +80,140 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def run_job(job_id, rows, template_html, upload_folder, reply_to):
+    job = JOBS[job_id]
+    q = job['q']
+    threads = []
+    total = len(rows)
+
+    def push(event):
+        q.put(event)
+
+    def send_one(row):
+        recipient = row['email']
+        subject = row['subject']
+        try:
+            with app.app_context():
+                content = Template(template_html).substitute(row)
+                msg = Message(subject=subject, recipients=[recipient], html=content,
+                              reply_to=reply_to)
+                attachment = row.get('attachment')
+                if attachment:
+                    if '.pdf' not in attachment:
+                        attachment += '.pdf'
+                    with app.open_resource(os.path.join(upload_folder, attachment)) as fp:
+                        msg.attach(attachment, 'application/pdf', fp.read())
+                mail.send(msg)
+            push({'type': 'success', 'recevier': recipient, 'subject': subject})
+        except Exception as e:
+            push({'type': 'error', 'recevier': recipient, 'subject': subject, 'error': str(e)})
+
+    for i, row in enumerate(rows):
+        if not row.get('email') or not row.get('subject') or not row.get('name'):
+            push({
+                'type': 'error',
+                'recevier': row.get('email'),
+                'subject': row.get('subject'),
+                'error': 'Missing email, subject or name',
+            })
+            continue
+        t = threading.Thread(target=send_one, args=(row,))
+        t.start()
+        threads.append(t)
+        if (i + 1) % BATCH_SIZE == 0 and (i + 1) < total:
+            for bt in threads[-BATCH_SIZE:]:
+                bt.join()
+            push({'type': 'pause', 'seconds': BATCH_SLEEP_SECONDS})
+            time.sleep(BATCH_SLEEP_SECONDS)
+
+    for t in threads:
+        t.join()
+
+    try:
+        shutil.rmtree(upload_folder)
+    except OSError as e:
+        print("Error: %s : %s" % (upload_folder, e.strerror))
+
+    push({'type': 'done'})
+
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    reply_to = None
+    if flask.request.method != 'POST':
+        return flask.render_template('index.html', preset=DEFAULT_PRESET, preset_token=None)
 
-    @flask.copy_current_request_context
-    def send_mail(recevier_array, subject, html_content, upload_folder, attachment):
+    UPLOAD_FOLDER: str = os.path.join(path, 'uploads' + str(datetime.now().timestamp()))
+    if not os.path.isdir(UPLOAD_FOLDER):
+        os.mkdir(UPLOAD_FOLDER)
+    _data = flask.request.form.to_dict()
+
+    app.config['MAIL_SERVER'] = _data.get('smtp_server')
+    app.config['MAIL_PORT'] = int(_data.get('smtp_port', 587))
+    app.config['MAIL_USE_TLS'] = _data.get('smtp_use_tls') == 'on'
+    app.config['MAIL_USE_SSL'] = False
+    app.config['MAIL_USERNAME'] = _data.get('email')
+    app.config['MAIL_PASSWORD'] = _data.get('apppw')
+    app.config['MAIL_DEFAULT_SENDER'] = _data.get('from')
+    reply_to = (_data.get('reply_to') or '').strip() or None
+    preset_token = (_data.get('preset_token') or '').strip() or None
+    mail.init_app(app)
+
+    if 'files[]' in flask.request.files:
+        for file in flask.request.files.getlist('files[]'):
+            if file and allowed_file(file.filename):
+                file.save(os.path.join(UPLOAD_FOLDER, file.filename))  # type: ignore
+
+    csvfile = flask.request.files['csv']
+    rows = []
+    if csvfile and allowed_file(csvfile.filename):
+        csvfile.save(os.path.join(UPLOAD_FOLDER, csvfile.filename))  # type: ignore
+        with open(os.path.join(UPLOAD_FOLDER, csvfile.filename), encoding='utf-8-sig', newline='') as f:  # type: ignore
+            rows = list(csv.DictReader(f))
+
+    template_html = markdown(_data['template'].replace('\r\n', '<br>'))
+
+    job_id = secrets.token_urlsafe(8)
+    with JOBS_LOCK:
+        JOBS[job_id] = {'q': queue.Queue(), 'total': len(rows)}
+
+    worker = threading.Thread(
+        target=run_job,
+        args=(job_id, rows, template_html, UPLOAD_FOLDER, reply_to),
+        daemon=True,
+    )
+    worker.start()
+
+    return flask.render_template('finish.html', job_id=job_id, total=len(rows), preset_token=preset_token)
+
+
+@app.route('/stream/<job_id>')
+def stream(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if job is None:
+        flask.abort(404)
+    q = job['q']
+
+    def gen():
         try:
-            msg = Message(subject=subject, recipients=recevier_array, html=html_content,
-                          reply_to=reply_to)
+            while True:
+                try:
+                    event = q.get(timeout=20)
+                except queue.Empty:
+                    yield ': keepalive\n\n'
+                    continue
+                yield f'data: {json.dumps(event)}\n\n'
+                if event.get('type') == 'done':
+                    break
+        finally:
+            with JOBS_LOCK:
+                JOBS.pop(job_id, None)
 
-            if attachment is not None:
-                if ".pdf" not in attachment:
-                    attachment += ".pdf"
-                with app.open_resource(os.path.join(upload_folder, attachment)) as fp:
-                    msg.attach(attachment, "application/pdf", fp.read())
-            print(msg)
-            mail.send(msg)
-            success.append({"recevier": recevier_array[0], "subject": subject})
-        except:
-            error.append({"recevier": recevier_array[0], "subject": subject})
-    error = []
-    success = []
-    threads = []
-    if flask.request.method == 'POST':
-        UPLOAD_FOLDER: str = os.path.join(path, 'uploads'+str(datetime.now().timestamp()))
-        if not os.path.isdir(UPLOAD_FOLDER):
-            os.mkdir(UPLOAD_FOLDER)
-        _data = flask.request.form.to_dict()
-
-        # Configure SMTP settings from user input
-        app.config['MAIL_SERVER'] = _data.get('smtp_server')
-        app.config['MAIL_PORT'] = int(_data.get('smtp_port', 587))
-        app.config['MAIL_USE_TLS'] = _data.get('smtp_use_tls') == 'on'
-        app.config['MAIL_USE_SSL'] = False  # Set to True if using port 465
-        app.config['MAIL_USERNAME'] = _data.get('email')
-        app.config['MAIL_PASSWORD'] = _data.get('apppw')
-        app.config['MAIL_DEFAULT_SENDER'] = _data.get('from')
-        reply_to = (_data.get('reply_to') or '').strip() or None
-        mail.init_app(app)
-        csvfile = flask.request.files['csv']
-        if 'files[]' in flask.request.files:
-            files = flask.request.files.getlist('files[]')
-            for file in files:
-                if file and allowed_file(file.filename):
-                    filename = file.filename
-                    file.save(os.path.join(UPLOAD_FOLDER, filename)) # type: ignore
-        if csvfile and allowed_file(csvfile.filename):
-            filename = csvfile.filename
-            csvfile.save(os.path.join(UPLOAD_FOLDER, filename)) # type: ignore
-            with open(os.path.join(UPLOAD_FOLDER, csvfile.filename), encoding='utf-8-sig', newline='') as csvfile_saved: # type: ignore
-                reader = csv.DictReader(csvfile_saved)
-                _data['template'] = markdown(_data['template'].replace("\r\n","<br>"))
-                rows = list(reader)
-                total = len(rows)
-                for i, row in enumerate(rows):
-                    if not row.get('email') or not row.get('subject') or not row.get('name'):
-                        error.append({"recevier": row.get('email'), "subject": row.get('subject'), "error": "Missing email, subject or name"})
-                        continue
-                    content_tmpl = Template(_data['template'])
-                    attachment = row.get('attachment', None)
-                    t = threading.Thread(target = send_mail,args=([row['email']], row['subject'], content_tmpl.substitute(row), UPLOAD_FOLDER, attachment))
-                    t.start()
-                    threads.append(t)
-                    if (i + 1) % BATCH_SIZE == 0 and (i + 1) < total:
-                        for bt in threads[-BATCH_SIZE:]:
-                            bt.join()
-                        time.sleep(BATCH_SLEEP_SECONDS)
-        for t in threads:
-            t.join()
-        try:
-            shutil.rmtree(UPLOAD_FOLDER)
-        except OSError as e:
-            print("Error: %s : %s" % (UPLOAD_FOLDER, e.strerror))
-        return flask.render_template('finish.html', success = success, error = error)
-    else:
-        return flask.render_template('index.html', preset=DEFAULT_PRESET)
+    headers = {
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+    }
+    return flask.Response(gen(), mimetype='text/event-stream', headers=headers)
 
 
 @app.route('/preset/save', methods=['POST'])
@@ -182,7 +244,7 @@ def load_preset(token):
     if row is None or not row['data']:
         flask.abort(404)
     preset = {**DEFAULT_PRESET, **json.loads(row['data'])}
-    return flask.render_template('index.html', preset=preset)
+    return flask.render_template('index.html', preset=preset, preset_token=token)
 
 
 if __name__ == '__main__':

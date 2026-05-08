@@ -14,39 +14,141 @@
     <style>
         html,
         body {
-            height: 100%;
+            min-height: 100%;
             background-color: darkcyan;
             color: white;
+        }
+
+        .list-scroll {
+            max-height: 50vh;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.15);
+            border-radius: .25rem;
+            padding: .5rem .75rem;
+        }
+
+        .list-scroll ul {
+            margin: 0;
+            padding-left: 1.25rem;
+        }
+
+        .progress {
+            background-color: rgba(255, 255, 255, 0.2);
         }
     </style>
 </head>
 
 <body>
-    <div class="container d-flex flex-column align-items-center justify-content-center h-100">
-        <div class="row w-100 justify-content-center">
-            <div class="col-md-6">
-                <h1>Success</h1>
-                <ul>
-                    {% for _success in success %}
-                    <li>{{_success}}</li>
-                    {% endfor %}
-                </ul>
-            </div>
-            <div class="col-md-6">
-                <h1>Error</h1>
-                <ul>
-                    {% for _error in error %}
-                    <li>{{_error}}</li>
-                    {% endfor %}
-                </ul>
-            </div>
-        </div>
-        <hr>
-        <div class="d-grid">
-            <a href="/" role="button" class="btn btn-warning">回前頁</a>
+    <div class="container py-4">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+            <h1 id="status-title" class="mb-0">Sending…</h1>
+            <span id="status-badge" class="badge bg-warning text-dark">in progress</span>
         </div>
 
+        <div class="mb-2">
+            <span id="done-count">0</span> / <span id="total-count">{{ total }}</span>
+            &nbsp;·&nbsp; success: <span id="success-count">0</span>
+            &nbsp;·&nbsp; error: <span id="error-count">0</span>
+            <span id="pause-note" class="ms-2 text-warning d-none"></span>
+        </div>
+        <div class="progress mb-4" style="height: 8px;">
+            <div id="progress-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
+        </div>
+
+        <div class="row">
+            <div class="col-md-6 mb-3">
+                <h2 class="h5">Success</h2>
+                <div class="list-scroll">
+                    <ul id="success-list"></ul>
+                </div>
+            </div>
+            <div class="col-md-6 mb-3">
+                <h2 class="h5">Error</h2>
+                <div class="list-scroll">
+                    <ul id="error-list"></ul>
+                </div>
+            </div>
+        </div>
+
+        <hr>
+        <div class="d-grid">
+            <a href="{% if preset_token %}/p/{{ preset_token }}{% else %}/{% endif %}" role="button" class="btn btn-warning">回前頁</a>
+        </div>
     </div>
+
+    <script>
+        (function () {
+            const total = parseInt(document.getElementById('total-count').textContent, 10) || 0;
+            const successList = document.getElementById('success-list');
+            const errorList = document.getElementById('error-list');
+            const successCount = document.getElementById('success-count');
+            const errorCount = document.getElementById('error-count');
+            const doneCount = document.getElementById('done-count');
+            const progressBar = document.getElementById('progress-bar');
+            const statusTitle = document.getElementById('status-title');
+            const statusBadge = document.getElementById('status-badge');
+            const pauseNote = document.getElementById('pause-note');
+
+            let succ = 0, errs = 0;
+
+            function updateProgress() {
+                const done = succ + errs;
+                doneCount.textContent = done;
+                if (total > 0) {
+                    progressBar.style.width = Math.min(100, (done / total) * 100) + '%';
+                }
+            }
+
+            function describe(d) {
+                const recv = d.recevier || '?';
+                const subj = d.subject || '?';
+                return `${recv} — ${subj}` + (d.error ? ` (${d.error})` : '');
+            }
+
+            const es = new EventSource('/stream/{{ job_id }}');
+
+            es.onmessage = function (e) {
+                let d;
+                try { d = JSON.parse(e.data); } catch { return; }
+                if (d.type === 'success') {
+                    succ++;
+                    successCount.textContent = succ;
+                    const li = document.createElement('li');
+                    li.textContent = describe(d);
+                    successList.appendChild(li);
+                    updateProgress();
+                } else if (d.type === 'error') {
+                    errs++;
+                    errorCount.textContent = errs;
+                    const li = document.createElement('li');
+                    li.textContent = describe(d);
+                    errorList.appendChild(li);
+                    updateProgress();
+                } else if (d.type === 'pause') {
+                    pauseNote.textContent = `（批次冷卻 ${d.seconds}s）`;
+                    pauseNote.classList.remove('d-none');
+                    setTimeout(() => pauseNote.classList.add('d-none'), (d.seconds || 0) * 1000);
+                } else if (d.type === 'done') {
+                    es.close();
+                    statusTitle.textContent = 'Done';
+                    statusBadge.textContent = 'finished';
+                    statusBadge.classList.remove('bg-warning', 'text-dark');
+                    statusBadge.classList.add('bg-success');
+                    progressBar.style.width = '100%';
+                }
+            };
+
+            es.onerror = function () {
+                statusBadge.textContent = 'connection lost';
+                statusBadge.classList.remove('bg-warning', 'text-dark', 'bg-success');
+                statusBadge.classList.add('bg-danger');
+            };
+
+            if (total === 0) {
+                progressBar.style.width = '100%';
+            }
+        })();
+    </script>
     <script src="https://kit.fontawesome.com/cc94f52acd.js" crossorigin="anonymous"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"
         integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>

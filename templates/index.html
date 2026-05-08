@@ -75,6 +75,7 @@
     <div class="container d-flex flex-column py-5">
         <div class="row w-100 align-items-center justify-content-center">
             <form class="col-md-6" id="main-form" method="post" action="/" enctype="multipart/form-data">
+                {% if preset_token %}<input type="hidden" name="preset_token" value="{{ preset_token }}">{% endif %}
                 <label for="from" class="form-label">寄件者</label>
                 <input class="form-control mb-3" type="text" name="from" id="input-from" placeholder="your@email.com"
                     value="{{ preset.from }}" required>
